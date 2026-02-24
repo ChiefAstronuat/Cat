@@ -645,3 +645,275 @@ CAT_AUDIO_MODEL_PATH=./models/meow.onnx
 4. Interaction Mode 전환
 5. Render Profile 훅 + 로깅
 6. Agent B/D 연동용 이벤트 입출력 연결
+
+---
+
+## 20. Agent B 수행안 (행동 엔진/FSM 실행)
+
+> 요청사항인 "B 수행"에 맞춰, Agent B가 행동 엔진을 독립적으로 구현/검증할 수 있도록 실행 계획을 확정한다.
+
+### 20-1. 목표 (B의 Definition of Success)
+- FSM 10개 상태가 정의되고, 상태 전이가 규칙 위반 없이 동작한다.
+- 사용자 입력(마우스 접근/클릭/유휴)에 대해 300ms 이내 행동 전이 신호를 생성한다.
+- 30분 자동 실행에서 행동 패턴이 과도하게 반복되지 않는다.
+- 집중모드/저전력 모드에서 개입도(소리/활동성) 감쇠가 적용된다.
+
+### 20-2. 구현 범위 (In-Scope / Out-of-Scope)
+- In-Scope
+  1. FSM 상태/전이 테이블 구현
+  2. Guard Layer(쿨다운/반복 억제/급격 전이 방지)
+  3. 입력 이벤트 해석기(UserInput -> Intent) 구현
+  4. BehaviorCommand 생성기(렌더/오디오 연동용)
+- Out-of-Scope
+  1. 오버레이 렌더링/좌표 업데이트는 Agent A 소관
+  2. seed 저장/복원 및 프리셋 관리는 Agent C 소관
+  3. 오디오 합성/성능 governor 운영은 Agent D 소관
+
+### 20-3. 상태 모델 설계 (MECE)
+1. **상위 상태 (Intent)**
+   - `Relaxed`, `Curious`, `Playful`, `Sleepy`, `Needy`
+2. **하위 행동 (Action)**
+   - `Idle`, `Walk`, `Run`, `Sit`, `Groom`, `Nap`, `Stretch`, `Look`, `Meow`, `Play`
+3. **전이 입력 (Input Signals)**
+   - `cursor_distance`, `click_burst`, `idle_seconds`, `time_of_day`, `focus_mode`
+4. **가드 규칙 (Guards)**
+   - 동일 행동 연속 횟수 제한
+   - 고강도 행동(`Run`, `Play`) 최소 쿨다운
+   - 집중모드 시 `Meow` 빈도/강도 감쇠
+
+### 20-4. 작업 분해 (WBS)
+1. **State Definition Layer**
+   - 상태 enum/전이 조건/우선순위 정의
+2. **Transition Engine Layer**
+   - `evaluateTransition(currentState, signals, memory)` 구현
+   - 확률 전이 + deterministic guard 결합
+3. **Behavior Memory Layer**
+   - 최근 N개 행동 히스토리/쿨다운 타임스탬프 저장
+   - 반복 패널티 점수 계산
+4. **Event Interpreter Layer**
+   - 입력 이벤트를 정규화 신호로 변환
+   - 사용자 활동 강도 산출(`engagement_score`)
+5. **Command Emitter Layer**
+   - `BehaviorCommand` 발행(`MoveTo`, `PlayAnim`, `TriggerMeow`)
+   - 상태 스냅샷(`CatRuntimeState.behavior`) 갱신
+
+### 20-5. Agent B 인터페이스 계약 (타 에이전트 연동점)
+- 입력(consume)
+  - `UserInputEvent.MouseMove(x, y, speed)`
+  - `UserInputEvent.MouseClick(x, y, button)`
+  - `UserInputEvent.IdleChanged(idleSeconds)`
+  - `SystemModeEvent.FocusModeChanged(isFocus)`
+- 출력(produce)
+  - `BehaviorCommand.MoveTo(x, y, speed)`
+  - `BehaviorCommand.PlayAnim(action, durationMs)`
+  - `BehaviorCommand.TriggerMeow(intent, intensity)`
+  - `CatRuntimeState.behavior` (`intent`, `action`, `cooldowns`, `engagementScore`)
+
+### 20-6. 완료 기준(DoD) — 측정 가능한 조건
+1. 상태 10종 + 전이 규칙 문서/코드 일치율 100%
+2. 30분 시뮬레이션에서 단일 행동 점유율 35% 이하
+3. 입력 이벤트 후 행동 전이 명령 발행까지 p95 300ms 이하
+4. 집중모드에서 `Meow` 트리거 빈도 기본 대비 50% 이상 감소
+5. Guard 규칙 위반 전이(쿨다운 미준수/급격 전이) 0건
+
+### 20-7. 테스트 방법 (B 전용)
+- 단위 테스트
+  - 전이 함수 조건별 테스트(정상/경계/예외)
+  - 쿨다운/반복 패널티 계산 검증
+- 시뮬레이션 테스트
+  - 30분 가상 입력 스트림 재생 후 행동 분포 확인
+  - 무입력(Idle) 장기 구간에서 Sleepy 전이 안정성 확인
+- 통합 전 테스트
+  - CommandEmitter 목(mock)으로 A/D 연동 포맷 검증
+  - 로그 기반 p95 반응 지연 계산
+
+### 20-8. 우선 구현 순서 (B 내부)
+1. State Definition Layer
+2. Transition Engine Layer
+3. Guard/Memory Layer
+4. Event Interpreter Layer
+5. Command Emitter Layer
+6. 시뮬레이션 기반 튜닝 + DoD 검증
+
+---
+
+## 21. Agent C 수행안 (정체성/커스터마이징/데이터 실행)
+
+> 요청사항인 "C 수행"에 맞춰, Agent C가 정체성 일관성과 사용자 커스터마이징을 독립적으로 구현/검증할 수 있도록 실행 계획을 확정한다.
+
+### 21-1. 목표 (C의 Definition of Success)
+- `cat_id`, `appearance_seed`, `personality_seed`가 안정적으로 생성/저장/복원된다.
+- 외형 프리셋(털색/눈색/무늬/액세서리) 변경이 즉시 반영되고 재실행 후 동일하게 복원된다.
+- 스키마 버전 관리로 향후 필드 확장 시에도 하위 호환이 보장된다.
+- 잘못된 설정 파일(누락/타입 오류/구버전)에서도 안전한 fallback으로 실행이 지속된다.
+
+### 21-2. 구현 범위 (In-Scope / Out-of-Scope)
+- In-Scope
+  1. 정체성 데이터 모델(`CatProfile`) 정의
+  2. 설정 저장소(read/write/migrate/validate) 구현
+  3. 커스터마이징 파라미터 스키마 및 프리셋 관리
+  4. 복원 재현성 검증 스크립트/테스트 케이스 작성
+- Out-of-Scope
+  1. 오버레이 렌더링/입력 처리 루프는 Agent A 소관
+  2. 행동 전이 및 Guard 판단은 Agent B 소관
+  3. 오디오 합성/성능 모드 판정은 Agent D 소관
+
+### 21-3. 데이터 모델/스키마 설계
+1. **Identity Layer**
+   - `cat_id: uuid`
+   - `appearance_seed: int`
+   - `personality_seed: int`
+2. **Appearance Layer**
+   - `body_type`, `fur_pattern`, `fur_color`, `eye_color`, `accessory`
+3. **Runtime Preference Layer**
+   - `perspective_mode`, `fps_target`, `low_power_default`, `audio_volume`
+4. **Metadata Layer**
+   - `schema_version`, `created_at`, `updated_at`, `profile_name`
+
+### 21-4. 작업 분해 (WBS)
+1. **Schema Definition Layer**
+   - JSON Schema 초안/검증 규칙 정의
+   - 필수/선택 필드, 기본값 전략 수립
+2. **Storage Layer**
+   - 사용자 디렉터리 저장 경로 확정
+   - 원자적 저장(임시 파일 -> rename)으로 손상 방지
+3. **Migration Layer**
+   - `v1 -> v2` 등 버전 업 변환기 구현
+   - 누락 필드 보정/폐기 필드 호환 처리
+4. **Validation/Fallback Layer**
+   - 스키마 검증 실패 시 안전 기본 프로필 로드
+   - 오류 로그/복구 사유 기록
+5. **Preset Management Layer**
+   - preset 저장/불러오기/복제/삭제 API
+   - 현재 활성 프리셋 포인터 관리
+
+### 21-5. Agent C 인터페이스 계약 (타 에이전트 연동점)
+- 입력(consume)
+  - `CustomizationEvent.UpdateAppearance(patch)`
+  - `SystemModeEvent.ProfileRequested(profileName)`
+  - `SystemModeEvent.AppStarted(appVersion)`
+- 출력(produce)
+  - `CatProfileLoaded(profile)`
+  - `CatProfileUpdated(profile, revision)`
+  - `CatRuntimeState.identity` (`catId`, `appearanceSeed`, `personalitySeed`, `profileName`)
+
+### 21-6. 완료 기준(DoD) — 측정 가능한 조건
+1. 저장->재실행->복원 시 identity 필드 일치율 100%
+2. 프리셋 저장/로드 100회 반복에서 데이터 손상 0건
+3. 스키마 검증 실패 케이스 20종에서 앱 비정상 종료 0회
+4. 구버전 프로필 마이그레이션 성공률 100%
+5. 프로필 저장 연산 p95 50ms 이하(로컬 디스크 기준)
+
+### 21-7. 테스트 방법 (C 전용)
+- 단위 테스트
+  - schema validator 정상/비정상 케이스
+  - migration 함수 버전별 변환 검증
+- 내구성 테스트
+  - 저장 중 강제 중단 시나리오 후 파일 무결성 확인
+  - 100회 연속 저장/로드 반복
+- 회귀 테스트
+  - 샘플 구버전 프로필 세트 재생 후 동일 출력 확인
+  - fallback 기본 프로필 로드 경로 검증
+
+### 21-8. 우선 구현 순서 (C 내부)
+1. Schema Definition Layer
+2. Storage Layer
+3. Validation/Fallback Layer
+4. Migration Layer
+5. Preset Management Layer
+6. 재현성/내구성 테스트 + DoD 검증
+
+---
+
+## 22. Agent D 수행안 (오디오/성능 거버너/검증 자동화 실행)
+
+> 요청사항인 "D 수행"에 맞춰, Agent D가 오디오 품질·저전력 정책·장시간 안정성을 독립적으로 구현/검증할 수 있도록 실행 계획을 확정한다.
+
+### 22-1. 목표 (D의 Definition of Success)
+- 울음 의도 기반 오디오 출력이 상태 문맥에 맞게 재생되고, 과도한 반복/볼륨 피로를 억제한다.
+- 성능 거버너가 `normal`/`low_power`/`focus_mode`에서 FPS·추론 주기를 자동 조절한다.
+- 8시간 soak test 동안 치명 오류 없이 CPU/RAM/FPS 로그가 안정 범위를 유지한다.
+- 정책/모델 비가용 시 fallback 오디오·fallback 성능 프로파일로 서비스가 지속된다.
+
+### 22-2. 구현 범위 (In-Scope / Out-of-Scope)
+- In-Scope
+  1. 오디오 의도 매핑 + 클립 선택 + DSP 변형 체인
+  2. 성능 거버너 정책 엔진(모드 감지/프로파일 전환)
+  3. 런타임 지표 수집기(CPU/RAM/FPS/dropFrame)
+  4. soak test/리포트 자동화 스크립트
+- Out-of-Scope
+  1. 오버레이 윈도우/렌더 루프 구현은 Agent A 소관
+  2. 행동 상태 전이 로직은 Agent B 소관
+  3. 프로필 스키마 저장/마이그레이션은 Agent C 소관
+
+### 22-3. 오디오 설계 (MVP 우선)
+1. **Intent Mapping Layer**
+   - 입력: `intent`, `action`, `intensity`, `focus_mode`
+   - 출력: `meow_type`, `volume`, `dsp_profile`
+2. **Clip Selector Layer**
+   - 동일 타입 연속 재생 제한(anti-repetition window)
+   - 최근 재생 이력 기반 확률 재가중
+3. **DSP Chain Layer**
+   - `pitch_shift`, `formant_shift`, `time_stretch`, `limiter`
+   - 볼륨 상한 및 피크 보호
+4. **Audio Fallback Layer**
+   - 모델/클립 불가 시 기본 meow bank 사용
+   - 오류 발생 시 무음 대신 저자극 기본음 재생
+
+### 22-4. 성능 거버너 설계
+1. **Mode Detector**
+   - `idle`, `interactive`, `focus_mode`, `fullscreen`
+2. **Policy Table**
+   - `normal`: 30FPS, AI 2~5Hz
+   - `low_power`: 15FPS, AI 1~2Hz
+   - `focus_mode`: 15FPS, meow 빈도 감쇠, 효과 최소화
+3. **Budget Enforcer**
+   - CPU/RAM 임계치 초과 시 단계적 하향(soft clamp -> hard clamp)
+4. **Recovery Controller**
+   - 임계치 복귀 시 점진적 성능 복원(급격 변동 방지)
+
+### 22-5. 작업 분해 (WBS)
+1. **Audio Intent/Selector Layer** 구현
+2. **DSP/Fallback Layer** 구현
+3. **Governor Mode/Policy Layer** 구현
+4. **Metrics Collector Layer** 구현
+5. **Soak Test Harness Layer** 구현
+6. **자동 리포트 생성기(요약/경고/회귀 비교)** 구현
+
+### 22-6. Agent D 인터페이스 계약 (타 에이전트 연동점)
+- 입력(consume)
+  - `BehaviorCommand.TriggerMeow(intent, intensity)`
+  - `SystemModeEvent.FocusModeChanged(isFocus)`
+  - `SystemModeEvent.PowerProfileChanged(profile)`
+  - `CatRuntimeState.renderStats` (`fps`, `frameTimeMs`, `dropFrames`)
+- 출력(produce)
+  - `PerformanceProfileApplied(profile, reason)`
+  - `AudioPlaybackState(lastClip, gain, dspProfile)`
+  - `RuntimeHealthSnapshot(cpuPct, ramMb, fps, aiHz, errorCount)`
+
+### 22-7. 완료 기준(DoD) — 측정 가능한 조건
+1. 동일 meow 타입 3회 초과 연속 재생률 1% 이하
+2. focus_mode 진입 후 meow 트리거 빈도 기본 대비 50% 이상 감소
+3. 8시간 soak test에서 crash/freeze 0회
+4. Idle CPU 1~3%, Active CPU 5% 이내(목표), RAM 150~300MB 범위 유지
+5. 임계치 초과 이벤트 발생 시 2초 이내 profile downshift 적용
+6. fallback 경로 테스트 10종에서 서비스 중단 0건
+
+### 22-8. 테스트 방법 (D 전용)
+- 오디오 테스트
+  - intent별 샘플 100회 재생 분포 검증
+  - 피크/클리핑 탐지 및 limiter 동작 확인
+- 성능 테스트
+  - 모드 전환 시 FPS/AI Hz 정책 적용 여부 검증
+  - CPU/RAM 부하 주입 시 downshift/recovery 동작 검증
+- 안정성 테스트
+  - 8시간 soak 자동화 + 30분 간격 health snapshot 기록
+  - 장애 주입(클립 누락/모델 경로 오류) 후 fallback 지속성 확인
+
+### 22-9. 우선 구현 순서 (D 내부)
+1. Governor Mode/Policy Layer
+2. Metrics Collector Layer
+3. Audio Intent/Selector + DSP/Fallback Layer
+4. Soak Test Harness + 리포트 자동화
+5. 장애 주입 테스트/임계치 튜닝
+6. A/B/C 통합 후 회귀 검증
